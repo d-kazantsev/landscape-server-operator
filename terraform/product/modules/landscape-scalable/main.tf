@@ -1,10 +1,10 @@
 # © 2026 Canonical Ltd.
 
 resource "juju_machine" "landscape_server" {
-  count = var.landscape_server.units
-  model = var.model
-  base  = var.landscape_server.base
-  name  = "landscape-server-${count.index}"
+  count      = var.landscape_server.units
+  model_uuid = var.model_uuid
+  base       = var.landscape_server.base
+  name       = "landscape-server-${count.index}"
 
   lifecycle {
     create_before_destroy = true
@@ -13,7 +13,7 @@ resource "juju_machine" "landscape_server" {
 
 module "landscape_server" {
   source      = "../../../charm"
-  model       = var.model
+  model_uuid  = var.model_uuid
   config      = var.landscape_server.config
   app_name    = var.landscape_server.app_name
   channel     = var.landscape_server.channel
@@ -28,8 +28,8 @@ module "landscape_server" {
 # Legacy external HAProxy (pre-26.04 only)
 # For 26.04+ with internal HAProxy, external LB would be in a separate model (LBaaS)
 module "haproxy" {
-  source      = "git::https://github.com/canonical/haproxy-operator.git//terraform/charm?ref=rev250"
-  model       = var.model
+  source      = "git::https://github.com/canonical/haproxy-operator.git//terraform/charm/haproxy?ref=haproxy-rev331"
+  model_uuid  = var.model_uuid
   config      = var.haproxy.config
   app_name    = var.haproxy.app_name
   channel     = var.haproxy.channel
@@ -43,7 +43,7 @@ module "haproxy" {
 
 resource "juju_application" "http_ingress" {
   name        = var.http_ingress.app_name
-  model       = var.model
+  model_uuid  = var.model_uuid
   machines    = toset([for m in juju_machine.landscape_server : m.machine_id])
   constraints = var.http_ingress.constraints
   config      = var.http_ingress.config
@@ -62,7 +62,7 @@ resource "juju_application" "http_ingress" {
 
 resource "juju_application" "hostagent_messenger_ingress" {
   name        = var.hostagent_messenger_ingress.app_name
-  model       = var.model
+  model_uuid  = var.model_uuid
   machines    = toset([for m in juju_machine.landscape_server : m.machine_id])
   constraints = var.hostagent_messenger_ingress.constraints
   config      = var.hostagent_messenger_ingress.config
@@ -81,7 +81,7 @@ resource "juju_application" "hostagent_messenger_ingress" {
 
 resource "juju_application" "ubuntu_installer_attach_ingress" {
   name        = var.ubuntu_installer_attach_ingress.app_name
-  model       = var.model
+  model_uuid  = var.model_uuid
   machines    = toset([for m in juju_machine.landscape_server : m.machine_id])
   constraints = var.ubuntu_installer_attach_ingress.constraints
   config      = var.ubuntu_installer_attach_ingress.config
@@ -99,15 +99,15 @@ resource "juju_application" "ubuntu_installer_attach_ingress" {
 }
 
 module "postgresql" {
-  source          = "git::https://github.com/canonical/postgresql-operator.git//terraform?ref=v16/1.135.0"
-  juju_model_name = var.model
-  config          = var.postgresql.config
-  app_name        = var.postgresql.app_name
-  channel         = var.postgresql.channel
-  constraints     = var.postgresql.constraints
-  revision        = var.postgresql.revision
-  base            = var.postgresql.base
-  units           = var.postgresql.units
+  source      = "git::https://github.com/canonical/postgresql-operator.git//terraform?ref=v16/1.165.0"
+  juju_model  = var.model_uuid
+  config      = var.postgresql.config
+  app_name    = var.postgresql.app_name
+  channel     = var.postgresql.channel
+  constraints = var.postgresql.constraints
+  revision    = var.postgresql.revision
+  base        = var.postgresql.base
+  units       = var.postgresql.units
 
   count = var.postgresql != null ? 1 : 0
 }
@@ -115,7 +115,7 @@ module "postgresql" {
 # TODO: Replace with internal charm module if/when it's created
 resource "juju_application" "rabbitmq_server" {
   name        = var.rabbitmq_server.app_name
-  model       = var.model
+  model_uuid  = var.model_uuid
   units       = var.rabbitmq_server.units
   constraints = var.rabbitmq_server.constraints
   config      = var.rabbitmq_server.config
@@ -132,7 +132,7 @@ resource "juju_application" "rabbitmq_server" {
 
 resource "juju_application" "lb_certs" {
   name        = var.lb_certs.app_name
-  model       = var.model
+  model_uuid  = var.model_uuid
   units       = var.lb_certs.units
   constraints = var.lb_certs.constraints
   config      = var.lb_certs.config
@@ -153,7 +153,7 @@ locals {
 }
 
 resource "juju_integration" "landscape_server_inbound_amqp" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name     = module.landscape_server.app_name
@@ -170,7 +170,7 @@ resource "juju_integration" "landscape_server_inbound_amqp" {
 }
 
 resource "juju_integration" "landscape_server_outbound_amqp" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name     = module.landscape_server.app_name
@@ -188,7 +188,7 @@ resource "juju_integration" "landscape_server_outbound_amqp" {
 
 # TODO: update when RMQ charm module exists
 resource "juju_integration" "landscape_server_rabbitmq_server" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name = module.landscape_server.app_name
@@ -205,7 +205,7 @@ resource "juju_integration" "landscape_server_rabbitmq_server" {
 
 # Legacy HAProxy integration (pre-26.04 internal haproxy)
 resource "juju_integration" "landscape_server_haproxy" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name = module.landscape_server.app_name
@@ -221,7 +221,7 @@ resource "juju_integration" "landscape_server_haproxy" {
 }
 
 resource "juju_integration" "landscape_server_tls_certificates" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name     = module.landscape_server.app_name
@@ -240,7 +240,7 @@ resource "juju_integration" "landscape_server_tls_certificates" {
 
 # Ingress configurator integrations (optional, for LBaaS)
 resource "juju_integration" "landscape_server_http_ingress" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name     = module.landscape_server.app_name
@@ -258,7 +258,7 @@ resource "juju_integration" "landscape_server_http_ingress" {
 }
 
 resource "juju_integration" "landscape_server_hostagent_messenger_ingress" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name     = module.landscape_server.app_name
@@ -276,7 +276,7 @@ resource "juju_integration" "landscape_server_hostagent_messenger_ingress" {
 }
 
 resource "juju_integration" "landscape_server_ubuntu_installer_attach_ingress" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name     = module.landscape_server.app_name
@@ -299,7 +299,7 @@ locals {
 
 
 resource "juju_integration" "landscape_server_postgresql_legacy" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name     = module.landscape_server.app_name
@@ -318,7 +318,7 @@ resource "juju_integration" "landscape_server_postgresql_legacy" {
 }
 
 resource "juju_integration" "landscape_server_postgresql_modern" {
-  model = var.model
+  model_uuid = var.model_uuid
 
   application {
     name     = module.landscape_server.app_name
