@@ -9,3 +9,8 @@ terraform {
     }
   }
 }
+
+provider "juju" {
+  username = var.juju_user
+  password = var.juju_password
+}
