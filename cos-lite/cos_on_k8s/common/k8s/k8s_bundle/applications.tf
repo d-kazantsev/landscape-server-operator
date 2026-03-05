@@ -1,0 +1,98 @@
+# Copyright 2024 Canonical Ltd.
+# See LICENSE file for licensing details.
+
+locals {
+  _k8s_keys      = keys(module.k8s_config.config)
+  _k8s_key_count = length(local._k8s_keys)
+  k8s_config     = local._k8s_key_count == 1 ? module.k8s_config.config[local._k8s_keys[0]] : null
+}
+
+resource "null_resource" "validate_unique_k8s" {
+  count = local._k8s_key_count == 1 ? 0 : 1
+
+  provisioner "local-exec" {
+    command = <<EOT
+      >&2 echo "ERROR: Expected exactly 1 k8s entry, but got ${local._k8s_keys}"
+      exit 1
+    EOT
+  }
+}
+
+output "debug" {
+  value = {
+    k8s_config = local.k8s_config
+    # ceph       = [for ceph in module.ceph : ceph.debug]
+    openstack = [for openstack in module.openstack : openstack.debug]
+  }
+}
+
+module "k8s" {
+  source   = "../k8s"
+  app_name = local.k8s_config.app_name
+  channel  = local.k8s_config.channel
+  config = merge(
+    (
+      length(keys(module.k8s_worker_config.config)) > 0 ?
+      # if there are workers, control-planes are tainted with NoSchedule
+      { "bootstrap-node-taints" : "node-role.kubernetes.io/control-plane:NoSchedule" } :
+      # if there are no-workers, control-planes cannot be tainted
+      {}
+    ),
+    local.k8s_config.config,
+  )
+  constraints       = local.k8s_config.constraints
+  model             = var.model_name
+  resources         = local.k8s_config.resources
+  revision          = local.k8s_config.revision
+  base              = local.k8s_config.base
+  units             = local.k8s_config.units
+  machines          = local.k8s_config.machines
+  endpoint_bindings = local.k8s_config.endpoint_bindings
+}
+
+module "k8s_worker" {
+  source            = "../k8s_worker"
+  for_each          = module.k8s_worker_config.config
+  app_name          = each.value.app_name
+  base              = coalesce(each.value.base, local.k8s_config.base)
+  constraints       = coalesce(each.value.constraints, local.k8s_config.constraints)
+  channel           = coalesce(each.value.channel, local.k8s_config.channel)
+  config            = each.value.config
+  model             = var.model_name
+  resources         = each.value.resources
+  revision          = each.value.revision
+  units             = each.value.units
+  machines          = each.value.machines
+  endpoint_bindings = each.value.endpoint_bindings
+}
+
+module "openstack" {
+  count             = var.cloud_integration == "openstack" ? 1 : 0
+  source            = "./openstack"
+  model             = var.model_name
+  manifest_yaml     = var.manifest_yaml
+  octavia_subnet_id = var.octavia_subnet_id
+  k8s = {
+    app_name    = module.k8s.app_name
+    base        = local.k8s_config.base
+    constraints = local.k8s_config.constraints
+    channel     = local.k8s_config.channel
+    provides    = module.k8s.provides
+    requires    = module.k8s.requires
+  }
+}
+
+# module "ceph" {
+#   count         = length([for v in var.csi_integration : v if v == "ceph"])
+#   source        = "./ceph"
+#   model         = var.model_name
+#   manifest_yaml = var.manifest_yaml
+#   k8s = {
+#     app_name    = module.k8s.app_name
+#     base        = local.k8s_config.base
+#     constraints = local.k8s_config.constraints
+#     channel     = local.k8s_config.channel
+#     provides    = module.k8s.provides
+#     requires    = module.k8s.requires
+#   }
+# }

@@ -1,0 +1,11 @@
+clouds:
+  ${name}:
+    type: openstack
+    auth-types: [userpass]
+    endpoint: ${protocol}://${hostname}:${port}/v3
+    regions:
+      ${region}:
+        endpoint: ${protocol}://${hostname}:${port}/v3
+    ca-certificates:
+    - |+
+      ${indent(6, file(server_cert))}

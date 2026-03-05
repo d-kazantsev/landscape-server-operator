@@ -1,0 +1,8 @@
+clouds:
+   ${name}:
+    type: maas
+    auth-types: [oauth1]
+    endpoint: ${protocol}://${hostname}:${port}/MAAS
+    regions:
+      ${region}:
+        endpoint: ${protocol}://${hostname}:${port}/MAAS

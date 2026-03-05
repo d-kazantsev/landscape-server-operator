@@ -1,0 +1,11 @@
+write_files:
+  - path: /etc/environment
+    content: |
+      http_proxy=http://91.189.88.68:3128
+      HTTP_PROXY=http://91.189.88.68:3128
+      no_proxy=127.0.0.1,.svc,localhost,10.160.181.0/24,10.160.181.20/24,10.160.181.21/24,10.160.181.22/24,10.160.181.23/24
+      https_proxy=http://91.189.88.68:3128
+      HTTPS_PROXY=http://91.189.88.68:3128
+      NO_PROXY=127.0.0.1,.svc,localhost,10.160.181.0/24,10.160.181.20/24,10.160.181.21/24,10.160.181.22/24,10.160.181.23/24
+    owner: "root:root"
+    permissions: "0644"

@@ -1,0 +1,8 @@
+clouds:
+  ${name}:
+    type: lxd
+    auth-types: [certificate]
+    endpoint: ${protocol}://${hostname}:${port}
+    regions:
+      ${region}:
+        endpoint: ${protocol}://${hostname}:${port}

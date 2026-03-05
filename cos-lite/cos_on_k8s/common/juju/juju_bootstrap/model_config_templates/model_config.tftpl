@@ -1,0 +1,110 @@
+cloudinit-userdata: |
+
+  %{~ if airgapped == true ~}
+  # apt: section configures /etc/apt/sources.list to use local repo
+  apt:
+    preserve_sources_list: false
+    primary:
+      - arches: [amd64]
+        uri: http://repo.${domain}/apt-mirror/archive.ubuntu.com/ubuntu/
+    security:
+      - arches: [amd64]
+        uri:  http://repo.${domain}/apt-mirror/security.ubuntu.com/ubuntu/
+
+    %{~ if cis_hardening_level != "" ~}
+    sources:
+      esm_cis:
+        source: "deb http://repo.${domain}/apt-mirror/esm.ubuntu.com/cis/ubuntu jammy main"
+        key: |
+          ${indent(10, file(esm_cis_key_path))}
+    %{~ endif ~}
+  %{~ endif ~}
+
+  locale: en_GB.UTF-8
+  preruncmd:
+    %{~ if airgapped == true ~}
+    # required for juju agent images simple streams
+    - su ubuntu -c 'gpg --import /tmp/juju.asc'
+    %{~ endif ~}
+    %{~ if cis_hardening_level != "" }
+    # CIS section (this section is optional and is used if you need to enable CIS)
+    %{~ if airgapped == false ~}
+    - sleep 180
+    - pro attach ${pro_token}
+    - pro enable usg
+    %{~ endif ~}
+    - apt update -y
+    - DEBIAN_FRONTEND=noninteractive apt install usg -y
+    - usg generate-tailoring ${cis_hardening_level} /tmp/custom_cis.xml
+    # install aide, change checksum config to based on sha256 only to improve db init speed
+    - DEBIAN_FRONTEND=noninteractive apt install aide -y
+    - cp /etc/aide/aide.conf /etc/aide/aide.conf.ori
+    - sed -i 's/Checksums = .*/Checksums = sha256/' /etc/aide/aide.conf
+
+    # 1.1.3.2 Disable mount_option_var_nodev
+    # Otherwise it impairs LXD : msg="Unable to access device nodes, LXD likely running on a nodev mount"
+    - sed -i '/mount_option_var_nodev/s/selected="true"/selected="false"/' /tmp/custom_cis.xml
+
+    # 1.1.3.3 Disable mount_option_var_nosuid
+    # Otherwise it impairs LXD: msg="Failed to start the daemon" err="Failed applying patch \"storage_move_custom_iso_block_volumes\": Failed getting storage pool names: Storage pool(s) not found
+    - sudo sed -i '/mount_option_var_nosuid/s/selected="true"/selected="false"/' /tmp/custom_cis.xml
+
+    # 6.1.10, 6.1.11 (lxd wil have unowned files)
+    - sudo sed -i '/no_files_unowned_by_user/s/selected="true"/selected="false"/' /tmp/custom_cis.xml
+    - sudo sed -i '/file_permissions_ungroupowned/s/selected="true"/selected="false"/' /tmp/custom_cis.xml
+
+    # 5.3.4 Ensure users must provide password for privilege escalation
+    # Allow for passwordless sudo to avoid breaking automation
+    - sudo sed -i '/content_rule_sudo_require_authentication/s/selected="true"/selected="false"/' /tmp/custom_cis.xml
+
+    - sudo usg fix --tailoring-file /tmp/custom_cis.xml
+
+    # fix for missing hostname in host file
+    - sudo sed -Ei 's/^127.0.0.1[[:space:]]([a-zA-Z0-9-]*)(#?.*)$/127.0.0.1 \1 '$(hostname)' \2/' /etc/hosts
+
+    # remove auditd as added by Hardening script but is not supported on containers
+    - systemd-detect-virt --container && apt purge -y auditd
+    - systemd-detect-virt --container || systemctl --now enable auditd
+  %{~ endif ~}
+
+  write_files:
+  %{~ if airgapped == true ~}
+    - path: /tmp/juju.asc
+      content: |
+        ${indent(8, file(juju_agents_key_path))}
+  %{~ endif ~}
+  %{~ if local_host_file == true }
+    - path: /etc/cloud/templates/hosts.debian.tmpl
+      content: |
+        ${pcr_ip_address} repo.${domain} snap.${domain} livepatch.${domain} candid.${domain} rbac.${domain} contract.${domain}
+      append: true
+  manage_etc_hosts: true
+  %{~ endif ~}
+
+  %{~ if ca_cert_path != "" ~}
+  ca_certs:
+    trusted:
+    - |
+      ${indent(6, file(ca_cert_path))}
+  %{~ endif ~}
+
+  %{~ if cis_hardening_level != "" ~}
+  power_state:
+    delay: "+0"
+    mode: reboot
+    timeout: 5
+    condition: True
+  %{~ endif ~}
+
+lxd-snap-channel: "${ lxd_snap_channel != null ? lxd_snap_channel : "latest/stable" }"
+
+%{~ if airgapped == true ~}
+container-image-metadata-url: "http://repo.${domain}/simple-streams-lxd/"
+container-image-stream: released
+
+image-metadata-url: "http://repo.${domain}/simple-streams-lxd/"
+image-stream: released
+
+agent-metadata-url: "http://repo.${domain}/simple-streams-juju/"
+agent-stream: released
+%{~ endif ~}
