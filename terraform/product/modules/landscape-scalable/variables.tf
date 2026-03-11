@@ -174,20 +174,4 @@ variable "lb_certs" {
   default  = {}
   nullable = true
 }
-variable "grafana-agent-landscape" {
-  description = "Configuration for the Grafana-agent charm. Set to null to skip deployment."
-  type = object({
-    app_name = optional(string, "grafana-agent-landscape")
-    channel  = optional(string, "2/stable")
-    config = optional(map(string), {
-    })
-    constraints = optional(string, "arch=amd64")
-    resources   = optional(map(string), {})
-    revision    = optional(number)
-    base        = optional(string, "ubuntu@24.04")
-    units       = optional(number, 1)
-  })
 
-  default  = {}
-  nullable = true
-}
