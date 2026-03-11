@@ -174,13 +174,3 @@ variable "lb_certs" {
   default  = {}
   nullable = true
 }
-
-variable "juju_user" {
-  description = "Juju controller user"
-  type        = string
-}
-
-variable "juju_password" {
-  description = "Juju controller password"
-  type        = string
-}
