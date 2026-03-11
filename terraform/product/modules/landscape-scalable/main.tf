@@ -148,6 +148,18 @@ resource "juju_application" "lb_certs" {
 
   count = var.lb_certs != null && local.has_internal_haproxy ? 1 : 0
 }
+resource "juju_application" "grafana-agent-landscape" {
+  name        = var.grafana-agent-landscape.app_name
+  model_uuid  = var.model_uuid
+  config      = var.grafana-agent-landscape.config
+
+  charm {
+    name     = "ingress-configurator"
+    revision = var.grafana-agent-landscape.revision
+    channel  = var.grafana-agent-landscape.channel
+    base     = var.grafana-agent-landscape.base
+  }
+}
 
 locals {
   has_modern_amqp_relations = can(module.landscape_server.requires.inbound_amqp) && can(module.landscape_server.requires.outbound_amqp)
