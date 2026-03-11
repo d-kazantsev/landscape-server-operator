@@ -10,7 +10,7 @@ terraform {
   }
 }
 
-provider "juju" {
-  username = var.juju_user
-  password = var.juju_password
-}
+#provider "juju" {
+#  username = var.juju_user
+#  password = var.juju_password
+#}
