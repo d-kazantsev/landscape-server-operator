@@ -4,6 +4,7 @@ resource "juju_machine" "landscape_server" {
   count      = var.landscape_server.units
   model_uuid = var.model_uuid
   base       = var.landscape_server.base
+  constraints = var.landscape_server.constraints
   name       = "landscape-server-${count.index}"
 
   lifecycle {
@@ -20,9 +21,10 @@ module "landscape_server" {
   constraints = var.landscape_server.constraints
   revision    = var.landscape_server.revision
   base        = var.landscape_server.base
+  units       = var.landscape_server.units
   machines    = toset([for m in juju_machine.landscape_server : m.machine_id])
 
-  depends_on = [juju_machine.landscape_server]
+ # depends_on = [juju_machine.landscape_server]
 }
 
 # Legacy external HAProxy (pre-26.04 only)
