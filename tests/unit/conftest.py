@@ -19,7 +19,6 @@ import settings_files
 
 
 class ConfigReader:
-
     def __init__(self, tempfile):
         self.tempfile = tempfile
 
@@ -27,6 +26,13 @@ class ConfigReader:
         config = ConfigParser()
         config.read(self.tempfile)
         return config
+
+
+@pytest.fixture(autouse=True)
+def mock_write_deployment_mode_systemd_override(monkeypatch):
+    monkeypatch.setattr(
+        "charm.write_deployment_mode_systemd_override", lambda *a, **kw: None
+    )
 
 
 @pytest.fixture(autouse=True)

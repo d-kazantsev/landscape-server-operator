@@ -5,9 +5,10 @@ Configuration for the Landscape charm.
 from collections import Counter
 from enum import Enum
 from pathlib import Path
+import re
 from typing import Any
 
-from pydantic import BaseModel, root_validator
+from pydantic import BaseModel, root_validator, validator
 import yaml
 
 
@@ -31,6 +32,11 @@ class LandscapeCharmConfiguration(BaseModel):
 
     landscape_ppa: str
     landscape_ppa_key: str
+
+    @property
+    def landscape_ppas(self) -> list[str]:
+        return [p.strip() for p in self.landscape_ppa.split(",") if p.strip()]
+
     worker_counts: int
     license_file: str | None = None
     openid_provider_url: str | None = None
@@ -75,6 +81,13 @@ class LandscapeCharmConfiguration(BaseModel):
     package_upload_base_port: int
     hostagent_server_base_port: int
     ubuntu_installer_attach_base_port: int
+
+    @validator("deployment_mode")
+    def deployment_mode_safe_chars(cls, v):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", v):
+            raise ValueError(f"deployment_mode {v!r} must match [A-Za-z0-9_-]+")
+
+        return v
 
     @root_validator(skip_on_failure=True)
     def openid_oidc_exclusive(cls, values):

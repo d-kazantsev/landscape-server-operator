@@ -8,15 +8,21 @@ from unittest import TestCase
 from unittest.mock import patch
 from urllib.error import URLError
 
+import pytest
+
 from settings_files import (
+    _DEPLOYMENT_MODE_OVERRIDE_CONF,
+    _SERVICES_WITH_HARDCODED_DEPLOYMENT_MODE,
     CONFIGS_DIR,
     configure_for_deployment_mode,
     LICENSE_FILE,
     LicenseFileReadException,
     merge_service_conf,
     prepend_default_settings,
+    read_service_conf,
     update_default_settings,
     update_service_conf,
+    write_deployment_mode_systemd_override,
     write_license_file,
 )
 
@@ -53,8 +59,59 @@ class CapturingStringIO(StringIO):
         return super().close(*args, **kwargs)
 
 
-class ConfigureForDeploymentModeTestCase(TestCase):
+@pytest.fixture()
+def redirect_systemd_paths(monkeypatch, tmp_path):
+    real_makedirs = os.makedirs
 
+    def fake_makedirs(path, exist_ok=False):
+        real_makedirs(
+            path.replace("/etc/systemd/system", str(tmp_path)), exist_ok=exist_ok
+        )
+
+    monkeypatch.setattr("settings_files.os.makedirs", fake_makedirs)
+    real_open = open
+
+    def fake_open(path, mode="r", **kwargs):
+        return real_open(
+            path.replace("/etc/systemd/system", str(tmp_path)), mode, **kwargs
+        )
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+
+@pytest.mark.usefixtures("redirect_systemd_paths")
+class TestWriteDeploymentModeSystemdOverride:
+    def test_writes_drop_in_for_each_service(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("settings_files.daemon_reload", lambda: None)
+
+        write_deployment_mode_systemd_override("prod")
+
+        for service in _SERVICES_WITH_HARDCODED_DEPLOYMENT_MODE:
+            drop_in = tmp_path / f"{service}.d" / _DEPLOYMENT_MODE_OVERRIDE_CONF
+            assert drop_in.exists()
+
+    def test_drop_in_content(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("settings_files.daemon_reload", lambda: None)
+
+        write_deployment_mode_systemd_override("prod")
+
+        for service in _SERVICES_WITH_HARDCODED_DEPLOYMENT_MODE:
+            content = (
+                tmp_path / f"{service}.d" / _DEPLOYMENT_MODE_OVERRIDE_CONF
+            ).read_text()
+            assert "[Service]" in content
+            assert "Environment=LANDSCAPE_SYSTEM__DEPLOYMENT_MODE=prod" in content
+
+    def test_calls_daemon_reload(self, monkeypatch, tmp_path):
+        called = []
+        monkeypatch.setattr("settings_files.daemon_reload", lambda: called.append(True))
+
+        write_deployment_mode_systemd_override("prod")
+
+        assert called == [True]
+
+
+class ConfigureForDeploymentModeTestCase(TestCase):
     @patch("os.symlink")
     def test_configure_for_deployment_mode_standalone(self, symlink_mock):
         """
@@ -94,7 +151,6 @@ class ConfigureForDeploymentModeTestCase(TestCase):
 
 
 class MergeServiceConfTestCase(TestCase):
-
     def test_merge_service_conf_new(self):
         """
         Tests that a new section and key are created in the existing
@@ -147,7 +203,6 @@ class MergeServiceConfTestCase(TestCase):
 
 
 class PrependDefaultSettingsTestCase(TestCase):
-
     def test_prepend(self):
         infile = StringIO("# Second line")
         outfile = CapturingStringIO()
@@ -166,7 +221,6 @@ class PrependDefaultSettingsTestCase(TestCase):
 
 
 class UpdateDefaultSettingsTestCase(TestCase):
-
     def test_setting_exists(self):
         """Tests that a setting gets updated if it exists."""
         infile = StringIO('TEST="no"\n')
@@ -205,7 +259,6 @@ class UpdateDefaultSettingsTestCase(TestCase):
 
 
 class UpdateServiceConfTestCase(TestCase):
-
     def test_no_section(self):
         """
         Tests that a new config section is created if it does not
@@ -261,7 +314,6 @@ class UpdateServiceConfTestCase(TestCase):
 
 
 class WriteLicenseFileTestCase(TestCase):
-
     def test_from_file(self):
         """
         Tests that a license can be read from a file:// and written.
@@ -336,3 +388,27 @@ class WriteLicenseFileTestCase(TestCase):
             1000,
             1000,
         )
+
+
+def test_read_service_conf_empty():
+    data = read_service_conf()
+    assert data == {}
+
+
+def test_read_service_conf_parses_section(capture_service_conf):
+    capture_service_conf.tempfile.write_text(
+        "[stores]\nhost = localhost:5432\nuser = landscape\n"
+    )
+    data = read_service_conf()
+    assert data["stores"]["host"] == "localhost:5432"
+    assert data["stores"]["user"] == "landscape"
+
+
+def test_read_service_conf_multiple_sections(capture_service_conf):
+    capture_service_conf.tempfile.write_text(
+        "[stores]\nhost = db:5432\n\n[schema]\nstore_user = ls\n"
+    )
+    data = read_service_conf()
+    assert "stores" in data
+    assert "schema" in data
+    assert data["schema"]["store_user"] == "ls"

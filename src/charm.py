@@ -14,6 +14,7 @@ develop a new k8s charm using the Operator Framework:
 
 from dataclasses import asdict
 from functools import cached_property
+import json
 import os
 import subprocess
 from subprocess import CalledProcessError, check_call
@@ -44,7 +45,7 @@ from charms.operator_libs_linux.v1.systemd import (
 from charms.traefik_k8s.v2.ingress import (
     IngressPerAppRequirer,
 )
-from ops import main
+from ops import main, Port
 from ops.charm import (
     ActionEvent,
     CharmBase,
@@ -85,10 +86,12 @@ from settings_files import (
     get_postgres_roles,
     merge_service_conf,
     prepend_default_settings,
+    read_service_conf,
     update_db_conf,
     update_default_settings,
     update_service_conf,
     VHOSTS,
+    write_deployment_mode_systemd_override,
     write_license_file,
 )
 
@@ -291,6 +294,9 @@ class LandscapeServerCharm(CharmBase):
         self.framework.observe(
             self.on.get_certificates_action, self._on_get_certificates_action
         )
+        self.framework.observe(
+            self.on.get_service_conf_action, self._on_get_service_conf_action
+        )
 
         # State
         self._stored.set_default(
@@ -470,11 +476,14 @@ class LandscapeServerCharm(CharmBase):
             logger.exception(e)
             return
 
+        self._set_ports()
+
         # Update additional configuration
         update_service_conf(
             {"global": {"deployment-mode": self.charm_config.deployment_mode}}
         )
         configure_for_deployment_mode(self.charm_config.deployment_mode)
+        write_deployment_mode_systemd_override(self.charm_config.deployment_mode)
 
         if self.charm_config.additional_service_config:
             merge_service_conf(self.charm_config.additional_service_config)
@@ -582,6 +591,31 @@ class LandscapeServerCharm(CharmBase):
         self._update_haproxy()
         self._update_ready_status(restart_services=True)
 
+    def _set_ports(self):
+        worker_counts = self.charm_config.worker_counts
+        ports = []
+
+        for i in range(worker_counts):
+            ports += [
+                Port("tcp", self.charm_config.pingserver_base_port + i),
+                Port("tcp", self.charm_config.appserver_base_port + i),
+                Port("tcp", self.charm_config.message_server_base_port + i),
+                Port("tcp", self.charm_config.api_base_port + i),
+            ]
+
+        if self.unit.is_leader():
+            ports.append(Port("tcp", self.charm_config.package_upload_base_port))
+
+        if self.charm_config.enable_hostagent_messenger:
+            ports.append(Port("tcp", self.charm_config.hostagent_server_base_port))
+
+        if self.charm_config.enable_ubuntu_installer_attach:
+            ports.append(
+                Port("tcp", self.charm_config.ubuntu_installer_attach_base_port)
+            )
+
+        self.unit.set_ports(*ports)
+
     def _get_secret_token(self) -> str | None:
         """
         Get the `secret-token` config from either the juju config for this unit, or from
@@ -665,8 +699,6 @@ class LandscapeServerCharm(CharmBase):
             except apt.GPGKeyError:
                 logger.error("Failed to import Landscape PPA key")
 
-        landscape_ppa = self.charm_config.landscape_ppa
-
         try:
             # This package is responsible for the hanging installs and ignores env vars
             apt.remove_package(["needrestart"])
@@ -676,40 +708,12 @@ class LandscapeServerCharm(CharmBase):
             # let's make sure to use the http(s) proxy settings from the charm or at
             # least any juju_proxy setting, add the classic http(s)_proxy to the env
             # that will be used only for add-apt-repository call
-            add_apt_repository_env = os.environ.copy()
-            for proxy_var, proxy_var_value in [
-                ("http_proxy", self.charm_config.http_proxy),
-                ("https_proxy", self.charm_config.https_proxy),
-            ]:
-                juju_proxy_var = f"JUJU_CHARM_{proxy_var.upper()}"
+            add_apt_repository_env = self._build_add_apt_repository_env()
 
-                # if the charm has a proxy conf configured, override juju_http(s)
-                # configuration
-                if proxy_var_value:
-                    add_apt_repository_env[proxy_var] = proxy_var_value
-                elif juju_proxy_var in add_apt_repository_env:
-                    add_apt_repository_env[proxy_var] = add_apt_repository_env[
-                        juju_proxy_var
-                    ]
-
-                if proxy_var in add_apt_repository_env:
-                    logger.info(
-                        f"add-apt-repository {proxy_var} variable set to : "
-                        f"{add_apt_repository_env[proxy_var]}"
-                    )
-
-            # juju_no_proxy is not perfectly compatible with Shell environment
-            # let's handle only the no_proxy from the charm's configuration
-            if self.charm_config.no_proxy:
-                add_apt_repository_env["no_proxy"] = self.charm_config.no_proxy
-                logger.info(
-                    f"add-apt-repository no_proxy variable set to : "
-                    f"{add_apt_repository_env['no_proxy']}"
+            for ppa in self.charm_config.landscape_ppas:
+                check_call(
+                    ["add-apt-repository", "-y", ppa], env=add_apt_repository_env
                 )
-
-            check_call(
-                ["add-apt-repository", "-y", landscape_ppa], env=add_apt_repository_env
-            )
 
             if self.charm_config.min_install:
                 logger.info("Not installing hashids..")
@@ -1238,6 +1242,9 @@ class LandscapeServerCharm(CharmBase):
 
         self._update_ready_status()
 
+    def _on_get_service_conf_action(self, event: ActionEvent) -> None:
+        event.set_results({"config": json.dumps(read_service_conf())})
+
     def _on_get_certificates_action(self, event: ActionEvent) -> None:
         cert_attrs = self._get_certificate_request_attributes()
         if not cert_attrs:
@@ -1419,7 +1426,7 @@ command[check_{service}]=/usr/local/lib/nagios/plugins/check_systemd.py {service
                 try:
                     service_resume(service)
                 except SystemdError as e:
-                    logger.warn(str(e))
+                    logger.warning(str(e))
         else:
             # Disable leader services on this unit. Requests will be directed to the
             # leader anyways.
@@ -1427,7 +1434,9 @@ command[check_{service}]=/usr/local/lib/nagios/plugins/check_systemd.py {service
                 try:
                     service_pause(service)
                 except SystemdError as e:
-                    logger.warn(str(e))
+                    logger.warning(str(e))
+
+        self._set_ports()
 
         self._update_haproxy()
         self._update_ready_status(restart_services=True)
@@ -1661,6 +1670,36 @@ command[check_{service}]=/usr/local/lib/nagios/plugins/check_systemd.py {service
             self.unit.status = ActiveStatus("Unit is ready")
             self._update_ready_status()
 
+    def _build_add_apt_repository_env(self) -> dict:
+        env = os.environ.copy()
+        for proxy_var, proxy_var_value in [
+            ("http_proxy", self.charm_config.http_proxy),
+            ("https_proxy", self.charm_config.https_proxy),
+        ]:
+            juju_proxy_var = f"JUJU_CHARM_{proxy_var.upper()}"
+
+            # if the charm has a proxy conf configured, override juju_http(s)
+            # configuration
+            if proxy_var_value:
+                env[proxy_var] = proxy_var_value
+            elif juju_proxy_var in env:
+                env[proxy_var] = env[juju_proxy_var]
+
+            if proxy_var in env:
+                logger.info(
+                    f"add-apt-repository {proxy_var} variable set to : {env[proxy_var]}"
+                )
+
+        # juju_no_proxy is not perfectly compatible with Shell environment
+        # let's handle only the no_proxy from the charm's configuration
+        if self.charm_config.no_proxy:
+            env["no_proxy"] = self.charm_config.no_proxy
+            logger.info(
+                f"add-apt-repository no_proxy variable set to: {env['no_proxy']}"
+            )
+
+        return env
+
     def _upgrade(self, event: ActionEvent) -> None:
         if self._stored.running:
             event.fail(
@@ -1672,6 +1711,22 @@ command[check_{service}]=/usr/local/lib/nagios/plugins/check_systemd.py {service
         prev_status = self.unit.status
         self.unit.status = MaintenanceStatus("Upgrading packages")
         event.log("Upgrading Landscape packages...")
+
+        try:
+            for ppa in self.charm_config.landscape_ppas:
+                check_call(
+                    ["add-apt-repository", "-y", ppa],
+                    env=self._build_add_apt_repository_env(),
+                )
+        except CalledProcessError as e:
+            logger.error(
+                "Failed to add APT repository %s during upgrade: %s",
+                ppa,
+                e,
+            )
+            event.fail(f"Failed to add APT repository {ppa}")
+            self.unit.status = BlockedStatus("Failed to upgrade packages")
+            return
 
         apt.update()
 

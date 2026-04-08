@@ -25,6 +25,7 @@ from ops.testing import (
     Relation,
     State,
     StoredState,
+    TCPPort,
 )
 import pytest
 from scenario.errors import UncaughtCharmError
@@ -53,7 +54,6 @@ GitHub actions will set `GITHUB_ACTIONS` during runs.
 
 
 class TestGrafanaMachineAgentRelation(unittest.TestCase):
-
     def _get_cos_agent_relation_config(self, state: State) -> dict:
         """
         Extract the cos-agent relation configuration.
@@ -205,6 +205,161 @@ class TestOnConfigChanged:
 
         assert haproxy.FrontendName.HOSTAGENT_MESSENGER in stored.haproxy_config
 
+    def test_deployment_mode_override_called(
+        self,
+        monkeypatch,
+    ):
+        calls = []
+        monkeypatch.setattr(
+            "charm.write_deployment_mode_systemd_override",
+            lambda mode: calls.append(mode),
+        )
+        monkeypatch.setattr("charm.configure_for_deployment_mode", lambda mode: None)
+        ctx = Context(LandscapeServerCharm)
+        state = State(config={"deployment_mode": "prod"})
+        ctx.run(ctx.on.config_changed(), state)
+        assert calls == ["prod"]
+
+    def test_hostagent_services_disable_closes_port(
+        self,
+        lb_certs_state,
+    ):
+        ctx = Context(LandscapeServerCharm)
+        initial_state = State(
+            **lb_certs_state,
+            config={"enable_hostagent_messenger": True},
+            stored_states=[
+                StoredState(
+                    owner_path="LandscapeServerCharm",
+                    content={"enable_hostagent_messenger": False},
+                )
+            ],
+        )
+        expected_port = TCPPort(port=50052, protocol="tcp")
+
+        state_in = ctx.run(ctx.on.config_changed(), initial_state)
+
+        assert expected_port in state_in.opened_ports
+
+        state_in.config.update({"enable_hostagent_messenger": False})
+
+        state_out = ctx.run(ctx.on.config_changed(), state_in)
+
+        assert expected_port not in state_out.opened_ports
+
+    def test_hostagent_services_enable_opens_port(
+        self,
+        lb_certs_state,
+    ):
+        ctx = Context(LandscapeServerCharm)
+        initial_state = State(
+            **lb_certs_state,
+            config={"enable_hostagent_messenger": False},
+            stored_states=[
+                StoredState(
+                    owner_path="LandscapeServerCharm",
+                    content={"enable_hostagent_messenger": True},
+                )
+            ],
+        )
+        expected_port = TCPPort(port=50052, protocol="tcp")
+
+        state_in = ctx.run(ctx.on.config_changed(), initial_state)
+
+        assert expected_port not in state_in.opened_ports
+
+        state_in.config.update({"enable_hostagent_messenger": True})
+
+        state_out = ctx.run(ctx.on.config_changed(), state_in)
+
+        assert expected_port in state_out.opened_ports
+
+    def test_ports_open(self):
+        ctx = Context(LandscapeServerCharm)
+        relation = PeerRelation("replicas", peers_data={})
+
+        # default config, non-leader unit
+        state_in = State(relations=[relation], config={}, leader=False)
+        expected_ports = {
+            TCPPort(port=8070, protocol="tcp"),
+            TCPPort(port=8071, protocol="tcp"),
+            TCPPort(port=8080, protocol="tcp"),
+            TCPPort(port=8081, protocol="tcp"),
+            TCPPort(port=8090, protocol="tcp"),
+            TCPPort(port=8091, protocol="tcp"),
+            TCPPort(port=9080, protocol="tcp"),
+            TCPPort(port=9081, protocol="tcp"),
+        }
+
+        state_out = ctx.run(ctx.on.config_changed(), state_in)
+
+        assert state_out.opened_ports == expected_ports
+
+        # default config, leader unit
+        state_in = State(relations=[relation], config={}, leader=True)
+        expected_ports = {
+            TCPPort(port=8070, protocol="tcp"),
+            TCPPort(port=8071, protocol="tcp"),
+            TCPPort(port=8080, protocol="tcp"),
+            TCPPort(port=8081, protocol="tcp"),
+            TCPPort(port=8090, protocol="tcp"),
+            TCPPort(port=8091, protocol="tcp"),
+            TCPPort(port=9080, protocol="tcp"),
+            TCPPort(port=9081, protocol="tcp"),
+            TCPPort(port=9100, protocol="tcp"),  # package upload
+        }
+
+        state_out = ctx.run(ctx.on.config_changed(), state_in)
+
+        assert state_out.opened_ports == expected_ports
+
+    def test_worker_count_affects_ports(self):
+        ctx = Context(LandscapeServerCharm)
+
+        relation = PeerRelation("replicas", peers_data={})
+        state_in = State(
+            relations=[relation], config={"worker_counts": 3}, leader=False
+        )
+        expected_ports = {
+            TCPPort(port=8070, protocol="tcp"),
+            TCPPort(port=8071, protocol="tcp"),
+            TCPPort(port=8072, protocol="tcp"),
+            TCPPort(port=8080, protocol="tcp"),
+            TCPPort(port=8081, protocol="tcp"),
+            TCPPort(port=8082, protocol="tcp"),
+            TCPPort(port=8090, protocol="tcp"),
+            TCPPort(port=8091, protocol="tcp"),
+            TCPPort(port=8092, protocol="tcp"),
+            TCPPort(port=9080, protocol="tcp"),
+            TCPPort(port=9081, protocol="tcp"),
+            TCPPort(port=9082, protocol="tcp"),
+        }
+
+        state_out = ctx.run(ctx.on.config_changed(), state_in)
+
+        assert state_out.opened_ports == expected_ports
+
+    def test_port_on_leader_change(self):
+        ctx = Context(LandscapeServerCharm)
+        relation = PeerRelation("replicas", peers_data={})
+        expected_port = TCPPort(port=9100, protocol="tcp")
+        leader_state = State(relations=[relation], config={}, leader=True)
+
+        state_out = ctx.run(ctx.on.leader_elected(), leader_state)
+
+        assert expected_port in state_out.opened_ports
+
+        non_leader_state = State(relations=[relation], leader=False)
+
+        event = ctx.on.relation_changed(relation)
+        state_out = ctx.run(event, non_leader_state)
+
+        assert expected_port not in state_out.opened_ports
+
+        state_out = ctx.run(event, leader_state)
+
+        assert expected_port in state_out.opened_ports
+
 
 class TestOnConfigChangedEnableUbuntuInstallerAttach:
     """
@@ -246,6 +401,35 @@ class TestOnConfigChangedEnableUbuntuInstallerAttach:
             LANDSCAPE_UBUNTU_INSTALLER_ATTACH, update_cache=True
         )
 
+    def test_enable_opens_port(
+        self,
+        apt_fixture,
+        lb_certs_state,
+        certificate_and_key_fixture,
+    ):
+        ctx = Context(LandscapeServerCharm)
+        initial_state = State(
+            **lb_certs_state,
+            config={"enable_ubuntu_installer_attach": False},
+            stored_states=[
+                StoredState(
+                    owner_path="LandscapeServerCharm",
+                    content={"enable_ubuntu_installer_attach": True},
+                )
+            ],
+        )
+        expected_port = TCPPort(port=53354, protocol="tcp")
+
+        state_in = ctx.run(ctx.on.config_changed(), initial_state)
+
+        assert expected_port not in state_in.opened_ports
+
+        state_in.config.update({"enable_ubuntu_installer_attach": True})
+
+        state_out = ctx.run(ctx.on.config_changed(), state_in)
+
+        assert expected_port in state_out.opened_ports
+
     def test_disable(self, apt_fixture, lb_certs_state):
         """
         If the `enable_ubuntu_installer_attach` parameter moves from `True` to `False`,
@@ -269,6 +453,35 @@ class TestOnConfigChangedEnableUbuntuInstallerAttach:
 
         assert haproxy.FrontendName.UBUNTU_INSTALLER_ATTACH not in stored.haproxy_config
         remove_package_mock.assert_called_once_with(LANDSCAPE_UBUNTU_INSTALLER_ATTACH)
+
+    def test_disable_closes_port(
+        self,
+        apt_fixture,
+        lb_certs_state,
+        certificate_and_key_fixture,
+    ):
+        ctx = Context(LandscapeServerCharm)
+        initial_state = State(
+            **lb_certs_state,
+            config={"enable_ubuntu_installer_attach": True},
+            stored_states=[
+                StoredState(
+                    owner_path="LandscapeServerCharm",
+                    content={"enable_ubuntu_installer_attach": False},
+                )
+            ],
+        )
+        expected_port = TCPPort(port=53354, protocol="tcp")
+
+        state_in = ctx.run(ctx.on.config_changed(), initial_state)
+
+        assert expected_port in state_in.opened_ports
+
+        state_in.config.update({"enable_ubuntu_installer_attach": False})
+
+        state_out = ctx.run(ctx.on.config_changed(), state_in)
+
+        assert expected_port not in state_out.opened_ports
 
     def test_idempotent_enable(
         self,
@@ -1296,7 +1509,7 @@ class TestCharm(unittest.TestCase):
         mocks["service_reload"].assert_called_once_with("postfix")
         with open(mock_postfix_cf) as mock_postfix_cf_file:
             self.assertEqual(
-                "relayhost = smtp.example.com\n" "othersetting = nada\n",
+                "relayhost = smtp.example.com\nothersetting = nada\n",
                 mock_postfix_cf_file.read(),
             )
 
@@ -1318,7 +1531,7 @@ class TestCharm(unittest.TestCase):
         mocks["service_reload"].assert_called_once_with("postfix")
         with open(mock_postfix_cf) as mock_postfix_cf_file:
             self.assertEqual(
-                "relayhost = smtp.example.com\n" "othersetting = nada\n",
+                "relayhost = smtp.example.com\nothersetting = nada\n",
                 mock_postfix_cf_file.read(),
             )
         self.assertIsInstance(self.harness.charm.unit.status, BlockedStatus)
@@ -1388,18 +1601,58 @@ class TestCharm(unittest.TestCase):
         event = Mock(spec_set=ActionEvent)
         self.harness.charm._stored.running = False
         prev_status = self.harness.charm.unit.status
+        ppa = self.harness.model.config.get("landscape_ppa")
 
-        with patch("charm.apt", spec_set=apt) as apt_mock, patch("charm.check_call"):
+        with (
+            patch("charm.apt", spec_set=apt) as apt_mock,
+            patch("charm.check_call") as check_call_mock,
+        ):
             pkg_mock = Mock()
             apt_mock.DebianPackage.from_apt_cache.return_value = pkg_mock
             self.harness.charm._upgrade(event)
 
+        check_call_mock.assert_any_call(["add-apt-repository", "-y", ppa], env=ANY)
         self.assertGreaterEqual(event.log.call_count, 5)
         self.assertEqual(
             apt_mock.DebianPackage.from_apt_cache.call_count, len(LANDSCAPE_PACKAGES)
         )
         self.assertEqual(pkg_mock.ensure.call_count, len(LANDSCAPE_PACKAGES))
         self.assertEqual(self.harness.charm.unit.status, prev_status)
+
+    def test_action_upgrade_passes_proxy_to_add_apt_repository(self):
+        event = Mock(spec_set=ActionEvent)
+        self.harness.charm._stored.running = False
+        ppa = "ppa:landscape/self-hosted-beta"
+        mock_config = Mock(
+            landscape_ppa=ppa,
+            http_proxy="http://proxy.example.com:3128",
+            https_proxy="https://proxy.example.com:3128",
+            no_proxy="localhost,127.0.0.1",
+        )
+        type(mock_config).landscape_ppas = PropertyMock(
+            side_effect=lambda: [
+                p.strip() for p in mock_config.landscape_ppa.split(",") if p.strip()
+            ]
+        )
+        self.harness.charm.charm_config = mock_config
+
+        with (
+            patch("charm.apt", spec_set=apt) as apt_mock,
+            patch("charm.check_call") as check_call_mock,
+            patch("charm.os.environ", {}),
+        ):
+            apt_mock.DebianPackage.from_apt_cache.return_value = Mock()
+            self.harness.charm._upgrade(event)
+
+        add_apt_call = next(
+            c
+            for c in check_call_mock.call_args_list
+            if c.args[0] == ["add-apt-repository", "-y", ppa]
+        )
+        env = add_apt_call.kwargs["env"]
+        self.assertEqual(env["http_proxy"], "http://proxy.example.com:3128")
+        self.assertEqual(env["https_proxy"], "https://proxy.example.com:3128")
+        self.assertEqual(env["no_proxy"], "localhost,127.0.0.1")
 
     def test_action_upgrade_running(self):
         """
@@ -1430,6 +1683,21 @@ class TestCharm(unittest.TestCase):
         apt_mock.DebianPackage.from_apt_cache.assert_called_once_with(
             "landscape-server"
         )
+        self.assertIsInstance(self.harness.charm.unit.status, BlockedStatus)
+
+    def test_action_upgrade_add_apt_repository_CalledProcessError(self):
+        event = Mock(spec_set=ActionEvent)
+        self.harness.charm._stored.running = False
+
+        with (
+            patch("charm.apt", spec_set=apt) as apt_mock,
+            patch("charm.check_call") as check_call_mock,
+        ):
+            check_call_mock.side_effect = CalledProcessError(1, "add-apt-repository")
+            self.harness.charm._upgrade(event)
+
+        event.fail.assert_called_once()
+        apt_mock.update.assert_not_called()
         self.assertIsInstance(self.harness.charm.unit.status, BlockedStatus)
 
     def test_action_migrate_schema(self):
@@ -1665,6 +1933,77 @@ class TestCharm(unittest.TestCase):
         )
 
 
+class TestMultiplePPAs:
+    def test_install_adds_each_ppa(self):
+        ppas = [
+            "ppa:landscape/self-hosted-beta",
+            "ppa:canonical-python-maintainers/python-backports",
+        ]
+        ctx = Context(LandscapeServerCharm)
+        state = State(
+            config={"landscape_ppa": ",".join(ppas)},
+            unit_status=MaintenanceStatus(),
+        )
+
+        with (
+            patch("charm.apt", spec_set=apt) as apt_mock,
+            patch("charm.check_call") as check_call_mock,
+            patch("charm.prepend_default_settings"),
+            patch("charm.update_service_conf"),
+        ):
+            apt_mock.add_package.return_value = None
+            ctx.run(ctx.on.install(), state)
+
+        for ppa in ppas:
+            check_call_mock.assert_any_call(["add-apt-repository", "-y", ppa], env=ANY)
+
+    def test_upgrade_adds_each_ppa(self):
+        ppas = [
+            "ppa:landscape/self-hosted-beta",
+            "ppa:canonical-python-maintainers/python-backports",
+        ]
+        ctx = Context(LandscapeServerCharm)
+        state = State(
+            config={"landscape_ppa": ",".join(ppas)},
+            unit_status=MaintenanceStatus(),
+            stored_states=[
+                StoredState(
+                    owner_path="LandscapeServerCharm",
+                    content={"running": False},
+                )
+            ],
+        )
+
+        with (
+            patch("charm.apt", spec_set=apt) as apt_mock,
+            patch("charm.check_call") as check_call_mock,
+        ):
+            apt_mock.DebianPackage.from_apt_cache.return_value = Mock()
+            ctx.run(ctx.on.action("upgrade"), state)
+
+        for ppa in ppas:
+            check_call_mock.assert_any_call(["add-apt-repository", "-y", ppa], env=ANY)
+
+    def test_install_single_ppa(self):
+        ppa = "ppa:landscape/self-hosted-beta"
+        ctx = Context(LandscapeServerCharm)
+        state = State(
+            config={"landscape_ppa": ppa},
+            unit_status=MaintenanceStatus(),
+        )
+
+        with (
+            patch("charm.apt", spec_set=apt) as apt_mock,
+            patch("charm.check_call") as check_call_mock,
+            patch("charm.prepend_default_settings"),
+            patch("charm.update_service_conf"),
+        ):
+            apt_mock.add_package.return_value = None
+            ctx.run(ctx.on.install(), state)
+
+        check_call_mock.assert_any_call(["add-apt-repository", "-y", ppa], env=ANY)
+
+
 # TODO fix from broken commit.
 @unittest.skip("Broken in `de29548e2b09c71db3a55f606ab318b5ea25550d`")
 class TestBootstrapAccount(unittest.TestCase):
@@ -1697,7 +2036,10 @@ class TestBootstrapAccount(unittest.TestCase):
     @patch("charm.update_service_conf")
     def test_bootstrap_account_doesnt_run_with_missing_configs(self, _):
         self.harness.update_config(
-            {"admin_email": "hello@ubuntu.com", "admin_name": "Hello Ubuntu"}
+            {
+                "admin_email": "hello@ubuntu.com",
+                "admin_name": "Hello Ubuntu",
+            }
         )
         self.assertIn("password required", self.log_mock.call_args.args[0])
         self.process_mock.assert_not_called()
@@ -2063,3 +2405,15 @@ class TestOnUpgradeCharm:
 
         haproxy_install_fixture.assert_not_called()
         assert stored.ready.get("load-balancer-certificates") is True
+
+
+def test_action_get_service_conf(monkeypatch):
+    conf = {"stores": {"host": "localhost:5432", "user": "landscape"}}
+    monkeypatch.setattr("charm.read_service_conf", lambda: conf)
+
+    ctx = Context(LandscapeServerCharm)
+    ctx.run(ctx.on.action("get-service-conf"), State())
+
+    assert ctx.action_results is not None
+    assert "config" in ctx.action_results
+    assert json.loads(ctx.action_results["config"]) == conf

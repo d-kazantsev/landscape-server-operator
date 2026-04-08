@@ -14,25 +14,19 @@ on:
 jobs:
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, noble, amd64]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
-      - name: Install Poetry
-        run: pipx install poetry
-
-      - name: Install dependencies
-        run: poetry install --with dev
-
-      - name: Run lint
-        run: make lint
+      - name: Check linting and formatting
+        run: make check
 
   terraform-check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, noble, amd64]
     steps:
       - uses: actions/checkout@v5
       - uses: hashicorp/setup-terraform@v3
